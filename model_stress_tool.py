@@ -42,7 +42,7 @@ def get_args():
         f"Last updated: {__updated__}"
     )
     parser = argparse.ArgumentParser(
-        description="vLLM CPU cluster stress test tool",
+        description="LLM cluster stress test tool",
         epilog=_epilog,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -113,7 +113,7 @@ def get_args():
         help=(
             "OpenAI-compatible gateway base URL (no trailing path). "
             "Host or host:port may omit scheme (try http then https). "
-            "Overrides MODEL_STRESS_GATEWAY_URL; default is built-in if unset."
+            f"Overrides MODEL_STRESS_GATEWAY_URL; if unset, default is {DEFAULT_GATEWAY_URL}."
         ),
     )
     return parser.parse_args()
