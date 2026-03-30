@@ -19,6 +19,11 @@ import threading
 # ================= Basic config =================
 DEFAULT_GATEWAY_URL = "http://192.168.1.145"
 
+__version__ = "1.0.0"
+__updated__ = "2026-03-30"
+__author__ = "chris.li@arista.com"
+__company__ = "Arista Network"
+
 
 def resolve_gateway_candidates(cli_value):
     """Return ordered base URLs to try. If input has no scheme, try http then https."""
@@ -30,7 +35,23 @@ def resolve_gateway_candidates(cli_value):
     return [f"http://{raw}", f"https://{raw}"]
 
 def get_args():
-    parser = argparse.ArgumentParser(description="vLLM CPU cluster stress test tool")
+    _epilog = (
+        f"Author: {__author__}\n"
+        f"Company: {__company__}\n"
+        f"Version: {__version__}\n"
+        f"Last updated: {__updated__}"
+    )
+    parser = argparse.ArgumentParser(
+        description="vLLM CPU cluster stress test tool",
+        epilog=_epilog,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "-V",
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__} ({__updated__})",
+    )
     parser.add_argument(
         "-r", "--random",
         action="store_true",
@@ -49,6 +70,22 @@ def get_args():
         help=(
             "Timeout (seconds): idle window that resets on each successful response, "
             "and per-request HTTP timeout. Default: 600."
+        ),
+    )
+    output_group = parser.add_mutually_exclusive_group()
+    output_group.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Verbose per-request lines: tokens, latency, TPS.",
+    )
+    output_group.add_argument(
+        "-b",
+        "--brief",
+        action="store_true",
+        help=(
+            "Brief per-request output: success '!', failure '.' (compact, like ping). "
+            "Default when neither -v nor -b is given."
         ),
     )
     parser.add_argument(
@@ -140,11 +177,10 @@ def generate_prompt(is_random, prompt_repeats=1):
 # ---------------------------------------------------------
 
 def _format_debug_model_output(req_id, text):
-    return (
-        f"======== DEBUG MODEL OUTPUT req={req_id:02d} ========\n"
-        f"{text}\n"
-        f"======== END DEBUG MODEL OUTPUT req={req_id:02d} ========"
-    )
+    req_s = f"req={req_id:02d}"
+    bar = "=" * 8
+    line = f"{bar} {req_s} {bar}"
+    return f"{line}\n{text}\n{line}\n"
 
 
 def send_request(
@@ -155,8 +191,10 @@ def send_request(
     max_tokens,
     request_timeout,
     prompt_repeats,
+    brief=False,
     debug=False,
     debug_lock=None,
+    debug_print_state=None,
 ):
     # [Opt 1] Random startup delay (jitter) so NGINX can refresh connection counts
     time.sleep(random.uniform(0.1, 0.8))
@@ -199,16 +237,30 @@ def send_request(
                 body = _assistant_text_from_completion(data)
                 block = _format_debug_model_output(req_id, body)
                 with debug_lock:
-                    print(ok_line, flush=True)
-                    print(block, flush=True)
+                    if not brief:
+                        print(ok_line, flush=True)
+                    prefix = ""
+                    if debug_print_state and debug_print_state["after_first"]:
+                        prefix = "\n"
+                    if debug_print_state is not None:
+                        debug_print_state["after_first"] = True
+                    print(prefix + block, end="", flush=True)
+            elif brief:
+                print("!", end="", flush=True)
             else:
                 print(ok_line, flush=True)
             return {"status": 1, "tokens": tokens, "latency": latency}
         else:
-            print(f"[FAIL] [req {req_id:02d}] HTTP {response.status_code}")
+            if brief:
+                print(".", end="", flush=True)
+            else:
+                print(f"[FAIL] [req {req_id:02d}] HTTP {response.status_code}")
             return {"status": 0}
     except Exception as e:
-        print(f"[WARN] [req {req_id:02d}] error: {e}")
+        if brief:
+            print(".", end="", flush=True)
+        else:
+            print(f"[WARN] [req {req_id:02d}] error: {e}")
         return {"status": 0}
 
 
@@ -235,7 +287,9 @@ def main():
         with last_ok_lock:
             last_ok["t"] = time.monotonic()
 
+    brief = args.brief or not args.verbose
     debug_lock = threading.Lock() if args.debug else None
+    debug_print_state = {"after_first": False} if args.debug else None
 
     def run_one(req_id):
         r = send_request(
@@ -246,8 +300,10 @@ def main():
             args.tokens,
             args.timeout,
             args.prompt_repeats,
+            brief=brief,
             debug=args.debug,
             debug_lock=debug_lock,
+            debug_print_state=debug_print_state,
         )
         if r.get("status") == 1:
             touch_success()
@@ -284,6 +340,9 @@ def main():
 
     for fut in pending:
         fut.cancel()
+
+    if brief:
+        print(flush=True)
 
     success = [r for r in results if r["status"] == 1]
     if not success:
