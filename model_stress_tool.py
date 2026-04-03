@@ -196,7 +196,7 @@ def send_request(
     debug_lock=None,
     debug_print_state=None,
 ):
-    # [Opt 1] Random startup delay (jitter) so NGINX can refresh connection counts
+    # Random startup delay (jitter) so NGINX can refresh connection counts
     time.sleep(random.uniform(0.1, 0.8))
 
     prompt = generate_prompt(is_random, prompt_repeats)
@@ -208,7 +208,6 @@ def send_request(
         "temperature": 0
     }
 
-    # [Opt 2] Force Connection: close (no keep-alive reuse)
     headers = {
         "Connection": "close"
     }
