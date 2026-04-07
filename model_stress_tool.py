@@ -24,6 +24,43 @@ __updated__ = "2026-03-30"
 __author__ = "chris.li@arista.com"
 __company__ = "Arista Network"
 
+PROMPT_PRESETS = {
+    "short": (
+        "Write an original English science fiction short story of about 500 words "
+        "about human migration to or settlement on Mars. Output story prose only, with no preamble."
+    ),
+    "medium": (
+        "Write an original English science fiction short story of about 500 words "
+        "about human migration to or settlement on Mars (not an outline or review). "
+        "Structure the narrative with a clear beginning, development, and resolution. "
+        "Ground characters and conflict in the Mars setting. Aim for roughly 450–550 words. "
+        "Output prose only: do not use lead-in phrases (for example, 'Sure, here is') "
+        "and do not add a separate title line unless it is embedded in the narrative."
+    ),
+    "long": (
+        "Write an original English science fiction short story about human migration to or settlement on Mars.\n\n"
+        "Requirements:\n"
+        "- Length: about 450–550 words (target ~500 words).\n"
+        "- Form: complete short fiction with setup, development, and resolution—not an outline, synopsis, or book review.\n"
+        "- Setting: the story must be anchored in Mars—domes, transit from Earth, terraforming, society on Mars, or Earth–Mars tension.\n"
+        "- Voice: third person or first person is fine; keep the tone serious or lightly adventurous science fiction, not comedy skit.\n"
+        "- Output: story prose only. Do not preface with meta-commentary. Do not include a standalone title line; you may name places in the text.\n"
+        "- Do not break the fourth wall or address the reader about the assignment.\n\n"
+        "Begin the story immediately with narrative prose."
+    ),
+}
+
+MARS_ANGLE_FOCUS = [
+    "first-generation life inside a pressurized dome",
+    "dispute over water-ice mining rights",
+    "Earth–Mars communications delay shaping a relationship or decision",
+    "a failed or difficult terraforming season",
+    "identity of someone born on Mars versus ties to Earth",
+    "arrival of a new wave of immigrants at a Martian settlement",
+    "political tension between Earth governance and Martian settlers",
+    "a generation ship's final approach and integration with surface life",
+]
+
 
 def resolve_gateway_candidates(cli_value):
     """Return ordered base URLs to try. If input has no scheme, try http then https."""
@@ -59,8 +96,17 @@ def get_args():
     )
     # -c concurrency
     parser.add_argument("-c", "--concurrency", type=int, default=10, help="Concurrent requests (default: 10)")
-    # -t Token length
-    parser.add_argument("-t", "--tokens", type=int, default=512, help="Max generation tokens (default: 512)")
+    # -t Token length (~500 English words needs roughly 650–800+ completion tokens; default leaves headroom)
+    parser.add_argument(
+        "-t",
+        "--tokens",
+        type=int,
+        default=1024,
+        help=(
+            "Max generation tokens (default: 1024). For ~500 English words use at least ~1024; "
+            "increase for long prompts or longer outputs."
+        ),
+    )
     parser.add_argument(
         "-T",
         "--timeout",
@@ -101,8 +147,29 @@ def get_args():
         default=1,
         metavar="N",
         help=(
-            "Repeat the one-line prompt N times with spaces (scales input length; "
+            "Repeat the full user prompt N times joined with spaces (scales input length; "
             "values below 1 are treated as 1). Default: 1."
+        ),
+    )
+    parser.add_argument(
+        "--prompt-size",
+        choices=("short", "medium", "long"),
+        default="medium",
+        help=(
+            "Built-in English Mars-migration story prompt length (input token load). "
+            "Ignored when -P/--prompt/--user-prompt is set to a non-empty string. Default: medium."
+        ),
+    )
+    parser.add_argument(
+        "-P",
+        "--prompt",
+        "--user-prompt",
+        dest="user_prompt",
+        default=None,
+        metavar="TEXT",
+        help=(
+            "Custom user message (replaces built-in preset; --prompt-size is then ignored). "
+            "If omitted or empty, use the built-in preset for --prompt-size."
         ),
     )
     parser.add_argument(
@@ -159,18 +226,30 @@ def get_active_model(gateway_candidates):
     print(f"[FAIL] Could not fetch model info from any URL. Last error: {last_err}")
     sys.exit(1)
 
-def generate_prompt(is_random, prompt_repeats=1):
-    """One-sentence user prompt; optional repeats join with spaces for length tests."""
-    if is_random:
-        line = (
-            f"Stress test ping (session {random.randint(100000, 999999)}), "
-            "reply with the single word OK and nothing else."
-        )
+def generate_prompt(
+    is_random,
+    prompt_repeats=1,
+    prompt_size="medium",
+    user_prompt=None,
+):
+    """Build user message: built-in Mars SF preset or custom text; optional cache-MISS variation; -p repeats."""
+    custom = (user_prompt or "").strip()
+    if custom:
+        base = custom
     else:
-        line = "Stress test ping, reply with the single word OK and nothing else."
+        base = PROMPT_PRESETS[prompt_size]
+
+    if is_random:
+        sid = random.randint(100000, 999999)
+        angle = random.choice(MARS_ANGLE_FOCUS)
+        base = (
+            f"{base}\n\n"
+            f"Variation for this request: session {sid}. "
+            f"Emphasize this angle: {angle}."
+        )
 
     repeats = max(1, int(prompt_repeats))
-    return " ".join([line] * repeats)
+    return " ".join([base] * repeats)
 
 # ---------------------------------------------------------
 # send_request uses the generator above
@@ -191,6 +270,8 @@ def send_request(
     max_tokens,
     request_timeout,
     prompt_repeats,
+    prompt_size="medium",
+    user_prompt=None,
     brief=False,
     debug=False,
     debug_lock=None,
@@ -199,7 +280,12 @@ def send_request(
     # Random startup delay (jitter) so NGINX can refresh connection counts
     time.sleep(random.uniform(0.1, 0.8))
 
-    prompt = generate_prompt(is_random, prompt_repeats)
+    prompt = generate_prompt(
+        is_random,
+        prompt_repeats,
+        prompt_size=prompt_size,
+        user_prompt=user_prompt,
+    )
 
     payload = {
         "model": model_name,
@@ -269,11 +355,15 @@ def main():
     model_name, gateway_url = get_active_model(candidates)
 
     mode_info = "[RANDOM] cache MISS" if args.random else "[STATIC] cache HIT"
+    if args.user_prompt and str(args.user_prompt).strip():
+        prompt_info = "prompt=CUSTOM"
+    else:
+        prompt_info = f"prompt_size={args.prompt_size}"
 
     print("\n" + "=" * 60)
     print(
         f"[START] cluster stress | concurrency: {args.concurrency} | "
-        f"prompt_repeats: {max(1, args.prompt_repeats)} | model: {model_name}"
+        f"prompt_repeats: {max(1, args.prompt_repeats)} | {prompt_info} | model: {model_name}"
     )
     print(f"[MODE] {mode_info}")
     print("=" * 60 + "\n")
@@ -299,6 +389,8 @@ def main():
             args.tokens,
             args.timeout,
             args.prompt_repeats,
+            prompt_size=args.prompt_size,
+            user_prompt=args.user_prompt,
             brief=brief,
             debug=args.debug,
             debug_lock=debug_lock,
